@@ -19,16 +19,18 @@ impl Default for Instrument {
         Self::None
     }
 }
-impl Instrument {
-    const SIZE: usize = 215;
 
+const INSTRUMENT_MEMORY_SIZE : usize = 215;
+const MOD_OFFSET : usize = 0;
+
+impl Instrument {
     pub fn read(reader: &mut impl std::io::Read) -> Result<Self> {
         let mut buf: Vec<u8> = vec![];
         reader.read_to_end(&mut buf).unwrap();
         let len = buf.len();
         let reader = Reader::new(buf);
 
-        if len < Self::SIZE + Version::SIZE {
+        if len < INSTRUMENT_MEMORY_SIZE + Version::SIZE {
             return Err(ParseError(
                 "File is not long enough to be a M8 Instrument".to_string(),
             ));
@@ -44,392 +46,112 @@ impl Instrument {
     pub(crate) fn from_reader2(reader: &Reader, number: u8, version: Version) -> Result<Self> {
         let start_pos = reader.pos();
         let kind = reader.read();
-        let name = reader.read_string(12);
-        let transpose = reader.read_bool();
-        let table_tick = reader.read();
-        let (volume, pitch, fine_tune) = if kind != 3 {
-            (reader.read(), reader.read(), reader.read())
-        } else {
-            (0, 0, 0)
-        };
 
-        let finalize = || -> () {
-            reader.set_pos(start_pos + Self::SIZE);
-        };
-
-        Ok(match kind {
+        let instr = match kind {
             0x00 => {
-                // WavSyn
-                let shape = reader.read();
-                let size = reader.read();
-                let mult = reader.read();
-                let warp = reader.read();
-                let mirror = reader.read();
-                let synth_params = SynthParams::from_reader2(reader, volume, pitch, fine_tune)?;
-                finalize();
-                Self::WavSynth(WavSynth {
+                Self::WavSynth(WavSynth::from_reader(
+                    reader,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    shape,
-                    size,
-                    mult,
-                    warp,
-                    mirror,
-                })
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader2(reader, vol, pi, ft))?)
             }
             0x01 => {
-                // MacroSyn
-                let shape = reader.read();
-                let timbre = reader.read();
-                let color = reader.read();
-                let degrade = reader.read();
-                let redux = reader.read();
-                let synth_params = SynthParams::from_reader2(reader, volume, pitch, fine_tune)?;
-                finalize();
-                Self::MacroSynth(MacroSynth {
+                Self::MacroSynth(MacroSynth::from_reader(
+                    reader,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    shape,
-                    timbre,
-                    color,
-                    degrade,
-                    redux,
-                })
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader2(reader, vol, pi, ft))?)
             }
             0x02 => {
-                // Sampler
-                let play_mode = reader.read();
-                let slice = reader.read();
-                let start = reader.read();
-                let loop_start = reader.read();
-                let length = reader.read();
-                let degrade = reader.read();
-                let synth_params = SynthParams::from_reader2(reader, volume, pitch, fine_tune)?;
-                reader.set_pos(start_pos + 0x57);
-                let sample_path = reader.read_string(128);
-                finalize();
-                Self::Sampler(Sampler {
+                Self::Sampler(Sampler::from_reader(
+                    reader,
+                    start_pos,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    sample_path,
-                    play_mode,
-                    slice,
-                    start,
-                    loop_start,
-                    length,
-                    degrade,
-                })
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader2(reader, vol, pi, ft))?)
             }
             0x03 => {
-                // MIDI
-                let port = reader.read();
-                let channel = reader.read();
-                let bank_select = reader.read();
-                let program_change = reader.read();
-                reader.read_bytes(3); // discard
-                let custom_cc: [ControlChange; 8] = arr![ControlChange::from_reader(reader)?; 8];
-                let mods = arr![AHDEnv::default().to_mod(); 4];
-                finalize();
-                Self::MIDIOut(MIDIOut {
-                    number,
-                    name,
-                    transpose,
-                    table_tick,
-
-                    port,
-                    channel,
-                    bank_select,
-                    program_change,
-                    custom_cc,
-                    mods,
-                })
+                Self::MIDIOut(MIDIOut::from_reader(reader, number)?)
             }
             0x04 => {
-                // FM
-                let algo = reader.read();
-                let mut operators: [Operator; 4] = arr![Operator::default(); 4];
-                if version.at_least(1, 4) {
-                    for i in 0..4 {
-                        operators[i].shape = reader.read();
-                    }
-                }
-                for i in 0..4 {
-                    operators[i].ratio = reader.read();
-                    operators[i].ratio_fine = reader.read();
-                }
-                for i in 0..4 {
-                    operators[i].level = reader.read();
-                    operators[i].feedback = reader.read();
-                }
-                for i in 0..4 {
-                    operators[i].mod_a = reader.read();
-                }
-                for i in 0..4 {
-                    operators[i].mod_b = reader.read();
-                }
-                let mod1 = reader.read();
-                let mod2 = reader.read();
-                let mod3 = reader.read();
-                let mod4 = reader.read();
-                let synth_params = SynthParams::from_reader2(reader, volume, pitch, fine_tune)?;
-                finalize();
-
-                Self::FMSynth(FMSynth {
+                Self::FMSynth(FMSynth::from_reader(
+                    reader,
+                    version,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader2(reader, vol, pi, ft))?)
+            }
+            0xFF => { Self::None }
+            _ => return Err(ParseError("Unsupported instr".into())),
+        };
 
-                    algo,
-                    operators,
-                    mod1,
-                    mod2,
-                    mod3,
-                    mod4,
-                })
-            }
-            0xFF => {
-                finalize();
-                Self::None
-            }
-            _ => panic!("Instrument type {} not supported", kind),
-        })
+        reader.set_pos(start_pos + INSTRUMENT_MEMORY_SIZE);
+
+        Ok(instr)
     }
 
     pub(crate) fn from_reader3(reader: &Reader, number: u8, version: Version) -> Result<Self> {
         let start_pos = reader.pos();
-        // println!("inst start pos: {:02x} ({})", start_pos, start_pos);
         let kind = reader.read();
-        let name = reader.read_string(12);
-        let transpose = reader.read_bool();
-        let table_tick = reader.read();
-        let (volume, pitch, fine_tune) = if kind != 3 {
-            (reader.read(), reader.read(), reader.read())
-        } else {
-            (0, 0, 0)
-        };
 
-        let finalize = || -> () {
-            reader.set_pos(start_pos + Self::SIZE);
-        };
+        println!("pos {start_pos:X}");
 
-        Ok(match kind {
+        let instr = match kind {
             0x00 => {
-                let shape = reader.read();
-                let size = reader.read();
-                let mult = reader.read();
-                let warp = reader.read();
-                let mirror = reader.read();
-                let synth_params = SynthParams::from_reader3(reader, volume, pitch, fine_tune, 30)?;
-                finalize();
-                Self::WavSynth(WavSynth {
+                Self::WavSynth(WavSynth::from_reader(
+                    reader,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    shape,
-                    size,
-                    mult,
-                    warp,
-                    mirror,
-                })
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader3(reader, vol, pi, ft, 30))?)
             }
             0x01 => {
-                let shape = reader.read();
-                let timbre = reader.read();
-                let color = reader.read();
-                let degrade = reader.read();
-                let redux = reader.read();
-                let synth_params = SynthParams::from_reader3(reader, volume, pitch, fine_tune, 30)?;
-                finalize();
-                Self::MacroSynth(MacroSynth {
+                Self::MacroSynth(MacroSynth::from_reader(
+                    reader,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    shape,
-                    timbre,
-                    color,
-                    degrade,
-                    redux,
-                })
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader3(reader, vol, pi, ft, 30))?)
             }
             0x02 => {
-                let play_mode = reader.read();
-                let slice = reader.read();
-                let start = reader.read();
-                let loop_start = reader.read();
-                let length = reader.read();
-                let degrade = reader.read();
-                let synth_params = SynthParams::from_reader3(reader, volume, pitch, fine_tune, 29)?;
-                reader.set_pos(start_pos + 0x57);
-                let sample_path = reader.read_string(128);
-                finalize();
-                Self::Sampler(Sampler {
+                Self::Sampler(Sampler::from_reader(
+                    reader,
+                    start_pos,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    sample_path,
-                    play_mode,
-                    slice,
-                    start,
-                    loop_start,
-                    length,
-                    degrade,
-                })
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader3(reader, vol, pi, ft, 29))?)
             }
             0x03 => {
-                let port = reader.read();
-                let channel = reader.read();
-                let bank_select = reader.read();
-                let program_change = reader.read();
-                reader.read_bytes(3); // discard
-                let custom_cc: [ControlChange; 8] = arr![ControlChange::from_reader(reader)?; 8];
-                let _discard = reader.read_bytes(25);
-                let mods = arr![Mod::from_reader(reader)?; 4];
-                finalize();
-                Self::MIDIOut(MIDIOut {
-                    number,
-                    name,
-                    transpose,
-                    table_tick,
-
-                    port,
-                    channel,
-                    bank_select,
-                    program_change,
-                    custom_cc,
-                    mods,
-                })
+                Self::MIDIOut(MIDIOut::from_reader(reader, number)?)
             }
             0x04 => {
-                let algo = reader.read();
-                let mut operators: [Operator; 4] = arr![Operator::default(); 4];
-                if version.at_least(1, 4) {
-                    for i in 0..4 {
-                        operators[i].shape = reader.read();
-                    }
-                }
-                for i in 0..4 {
-                    operators[i].ratio = reader.read();
-                    operators[i].ratio_fine = reader.read();
-                }
-                for i in 0..4 {
-                    operators[i].level = reader.read();
-                    operators[i].feedback = reader.read();
-                }
-                for i in 0..4 {
-                    operators[i].mod_a = reader.read();
-                }
-                for i in 0..4 {
-                    operators[i].mod_b = reader.read();
-                }
-                let mod1 = reader.read();
-                let mod2 = reader.read();
-                let mod3 = reader.read();
-                let mod4 = reader.read();
-                let synth_params = SynthParams::from_reader3(reader, volume, pitch, fine_tune, 2)?;
-                finalize();
-
-                Self::FMSynth(FMSynth {
-                    number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    algo,
-                    operators,
-                    mod1,
-                    mod2,
-                    mod3,
-                    mod4,
-                })
+                Self::FMSynth(FMSynth::from_reader(
+                    reader,
+                    version,
+                    number, 
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader3(reader, vol, pi, ft, 2)
+                )?)
             }
             0x05 => {
-                // HyperSynth
-
-                let chord = arr![reader.read(); 7];
-                let scale = reader.read();
-                let shift = reader.read();
-                let swarm = reader.read();
-                let width = reader.read();
-                let subosc = reader.read();
-                let synth_params = SynthParams::from_reader3(reader, volume, pitch, fine_tune, 23)?;
-
-                finalize();
-                Self::HyperSynth(HyperSynth {
+                Self::HyperSynth(HyperSynth::from_reader(
+                    reader,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    scale,
-                    chord,
-                    shift,
-                    swarm,
-                    width,
-                    subosc,
-                })
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader3(reader, vol, pi, ft, 23))?)
             }
             0x06 => {
-                // External
-                let input = reader.read();
-                let port = reader.read();
-                let channel = reader.read();
-                let bank = reader.read();
-                let program = reader.read();
-                let cca = ControlChange::from_reader(reader)?;
-                let ccb = ControlChange::from_reader(reader)?;
-                let ccc = ControlChange::from_reader(reader)?;
-                let ccd = ControlChange::from_reader(reader)?;
-                let synth_params = SynthParams::from_reader3(reader, volume, pitch, fine_tune, 22)?;
-                finalize();
-                Self::External(ExternalInst {
+                Self::External(ExternalInst::from_reader(
+                    reader,
                     number,
-                    name,
-                    transpose,
-                    table_tick,
-                    synth_params,
-
-                    input,
-                    port,
-                    channel,
-                    bank,
-                    program,
-                    cca,
-                    ccb,
-                    ccc,
-                    ccd,
-                })
+                    |reader, vol, pi, ft|
+                        SynthParams::from_reader3(reader, vol, pi, ft, 22))?)
             }
-            0xFF => {
-                finalize();
-                Self::None
-            }
+            0xFF => { Self::None }
             _ => panic!("Instrument type {} not supported", kind),
-        })
+        };
+
+        reader.set_pos(start_pos + INSTRUMENT_MEMORY_SIZE);
+
+        Ok(instr)
     }
 }
 
@@ -448,6 +170,45 @@ pub struct WavSynth {
     pub mirror: u8,
 }
 
+impl WavSynth {
+    pub fn from_reader<FS>(reader: &Reader, number: u8, synth_callback: FS) -> Result<Self>
+        where FS: Fn(&Reader, u8, u8, u8) -> Result<SynthParams> {
+
+        let name = reader.read_string(12);
+        let transpeq = reader.read();
+        let transpose = (transpeq & 1) != 0;
+        let table_tick = reader.read();
+        let volume = reader.read();
+        let pitch = reader.read();
+        let fine_tune = reader.read();
+
+        let shape = reader.read();
+        let size = reader.read();
+        let mult = reader.read();
+        let warp = reader.read();
+        let mirror = reader.read();
+        let synth_params = synth_callback(
+            reader,
+            volume,
+            pitch,
+            fine_tune)?;
+
+        Ok(WavSynth {
+            number,
+            name,
+            transpose,
+            table_tick,
+            synth_params,
+
+            shape,
+            size,
+            mult,
+            warp,
+            mirror,
+        })
+    }
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub struct MacroSynth {
     pub number: u8,
@@ -463,11 +224,48 @@ pub struct MacroSynth {
     pub redux: u8,
 }
 
+impl MacroSynth {
+    pub fn from_reader<FS>(reader: &Reader, number: u8, synth_callback: FS) -> Result<Self>
+        where FS: Fn(&Reader, u8, u8, u8) -> Result<SynthParams> {
+
+        let name = reader.read_string(12);
+
+        let transpeq = reader.read();
+        let transpose = (transpeq & 1) != 0;
+        let table_tick = reader.read();
+        let volume = reader.read();
+        let pitch = reader.read();
+        let fine_tune = reader.read();
+
+        let shape = reader.read();
+        let timbre = reader.read();
+        let color = reader.read();
+        let degrade = reader.read();
+        let redux = reader.read();
+        let synth_params = synth_callback(reader, volume, pitch, fine_tune)?;
+
+        Ok(MacroSynth {
+            number,
+            name,
+            transpose,
+            table_tick,
+            synth_params,
+
+            shape,
+            timbre,
+            color,
+            degrade,
+            redux,
+        })
+    }
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub struct Sampler {
     pub number: u8,
     pub name: String,
     pub transpose: bool,
+    pub eq_number: u8,
     pub table_tick: u8,
     pub synth_params: SynthParams,
 
@@ -480,10 +278,54 @@ pub struct Sampler {
     pub degrade: u8,
 }
 
+impl Sampler {
+    pub fn from_reader<FS>(reader: &Reader, start_pos: usize, number: u8, synth_callback: FS) -> Result<Self>
+        where FS: Fn(&Reader, u8, u8, u8) -> Result<SynthParams> {
+
+        let name = reader.read_string(12);
+
+        let transpeq = reader.read();
+        let transpose = (transpeq & 1) != 0;
+        let table_tick = reader.read();
+        let volume = reader.read();
+        let pitch = reader.read();
+        let fine_tune = reader.read();
+
+        let play_mode = reader.read();
+        let slice = reader.read();
+        let start = reader.read();
+        let loop_start = reader.read();
+        let length = reader.read();
+        let degrade = reader.read();
+
+        let synth_params = synth_callback(reader, volume, pitch, fine_tune)?;
+        reader.set_pos(start_pos + 0x57);
+        let sample_path = reader.read_string(128);
+
+        Ok(Sampler {
+            number,
+            name,
+            eq_number: transpeq >> 1,
+            transpose,
+            table_tick,
+            synth_params,
+
+            sample_path,
+            play_mode,
+            slice,
+            start,
+            loop_start,
+            length,
+            degrade,
+        })
+    }
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub struct FMSynth {
     pub number: u8,
     pub name: String,
+    pub eq_number: u8,
     pub transpose: bool,
     pub table_tick: u8,
     pub synth_params: SynthParams,
@@ -494,6 +336,66 @@ pub struct FMSynth {
     pub mod2: u8,
     pub mod3: u8,
     pub mod4: u8,
+}
+
+impl FMSynth {
+
+    pub fn from_reader<FS>(reader: &Reader, version: Version, number: u8, synth_callback: FS) -> Result<Self>
+        where FS: Fn(&Reader, u8, u8, u8) -> Result<SynthParams> {
+
+        let name = reader.read_string(12);
+        let transpeq = reader.read();
+        let transpose = (transpeq & 1) != 0;
+        let table_tick = reader.read();
+        let volume = reader.read();
+        let pitch = reader.read();
+        let fine_tune = reader.read();
+
+        let algo = reader.read();
+        let mut operators: [Operator; 4] = arr![Operator::default(); 4];
+        if version.at_least(1, 4) {
+            for i in 0..4 {
+                operators[i].shape = reader.read();
+            }
+        }
+        for i in 0..4 {
+            operators[i].ratio = reader.read();
+            operators[i].ratio_fine = reader.read();
+        }
+        for i in 0..4 {
+            operators[i].level = reader.read();
+            operators[i].feedback = reader.read();
+        }
+        for i in 0..4 {
+            operators[i].mod_a = reader.read();
+        }
+        for i in 0..4 {
+            operators[i].mod_b = reader.read();
+        }
+        let mod1 = reader.read();
+        let mod2 = reader.read();
+        let mod3 = reader.read();
+        let mod4 = reader.read();
+
+        let synth_params =
+            synth_callback(reader, volume, pitch, fine_tune)?;
+
+        Ok(FMSynth {
+            number,
+            name,
+            eq_number: transpeq >> 1,
+            transpose,
+            table_tick,
+            synth_params,
+
+            algo,
+            operators,
+            mod1,
+            mod2,
+            mod3,
+            mod4,
+        })
+    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -512,10 +414,41 @@ pub struct MIDIOut {
     pub mods: [Mod; 4],
 }
 
+impl MIDIOut {
+    pub fn from_reader(reader: &Reader, number: u8) -> Result<Self> {
+        let name = reader.read_string(12);
+        let transpose = reader.read_bool();
+        let table_tick = reader.read();
+
+        let port = reader.read();
+        let channel = reader.read();
+        let bank_select = reader.read();
+        let program_change = reader.read();
+        reader.read_bytes(3); // discard
+        let custom_cc: [ControlChange; 8] = arr![ControlChange::from_reader(reader)?; 8];
+        let mods = arr![AHDEnv::default().to_mod(); 4];
+
+        Ok(MIDIOut {
+            number,
+            name,
+            transpose,
+            table_tick,
+
+            port,
+            channel,
+            bank_select,
+            program_change,
+            custom_cc,
+            mods,
+        })
+    }
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub struct HyperSynth {
     pub number: u8,
     pub name: String,
+    pub eq_number: u8,
     pub transpose: bool,
     pub table_tick: u8,
     pub synth_params: SynthParams,
@@ -528,10 +461,49 @@ pub struct HyperSynth {
     pub subosc: u8,
 }
 
+impl HyperSynth {
+    pub fn from_reader<FS>(reader: &Reader, number: u8, synth_callback: FS) -> Result<Self>
+        where FS: Fn(&Reader, u8, u8, u8) -> Result<SynthParams> {
+
+        let name = reader.read_string(12);
+        let transpeq = reader.read();
+        let transpose = (transpeq & 1) != 0;
+        let table_tick = reader.read();
+        let volume = reader.read();
+        let pitch = reader.read();
+        let fine_tune = reader.read();
+
+        let chord = arr![reader.read(); 7];
+        let scale = reader.read();
+        let shift = reader.read();
+        let swarm = reader.read();
+        let width = reader.read();
+        let subosc = reader.read();
+        let synth_params = synth_callback(reader, volume, pitch, fine_tune)?;
+
+        Ok(HyperSynth {
+            number,
+            name,
+            eq_number: transpeq  >> 1,
+            transpose,
+            table_tick,
+            synth_params,
+
+            scale,
+            chord,
+            shift,
+            swarm,
+            width,
+            subosc,
+        })
+    }
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub struct ExternalInst {
     pub number: u8,
     pub name: String,
+    pub eq_number: u8,
     pub transpose: bool,
     pub table_tick: u8,
     pub synth_params: SynthParams,
@@ -545,6 +517,53 @@ pub struct ExternalInst {
     pub ccb: ControlChange,
     pub ccc: ControlChange,
     pub ccd: ControlChange,
+}
+
+impl ExternalInst {
+
+    pub fn from_reader<FS>(reader: &Reader, number: u8, synth_callback: FS) -> Result<Self>
+        where FS: Fn(&Reader, u8, u8, u8) -> Result<SynthParams> {
+
+        let name = reader.read_string(12);
+        let transpeq = reader.read();
+        let transpose = (transpeq & 1) != 0;
+        let table_tick = reader.read();
+        let volume = reader.read();
+        let pitch = reader.read();
+        let fine_tune = reader.read();
+
+        let input = reader.read();
+        let port = reader.read();
+        let channel = reader.read();
+        let bank = reader.read();
+        let program = reader.read();
+        let cca = ControlChange::from_reader(reader)?;
+        let ccb = ControlChange::from_reader(reader)?;
+        let ccc = ControlChange::from_reader(reader)?;
+        let ccd = ControlChange::from_reader(reader)?;
+
+        let synth_params =
+            synth_callback(reader, volume, pitch, fine_tune)?;
+
+        Ok(ExternalInst {
+            number,
+            name,
+            eq_number: transpeq >> 1,
+            transpose,
+            table_tick,
+            synth_params,
+
+            input,
+            port,
+            channel,
+            bank,
+            program,
+            cca,
+            ccb,
+            ccc,
+            ccd,
+        })
+    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -568,6 +587,7 @@ pub struct SynthParams {
 
     pub mods: [Mod; 4],
 }
+
 impl SynthParams {
     fn from_reader2(reader: &Reader, volume: u8, pitch: u8, fine_tune: u8) -> Result<Self> {
         Ok(Self {
@@ -616,7 +636,9 @@ impl SynthParams {
         let mixer_chorus = reader.read();
         let mixer_delay = reader.read();
         let mixer_reverb = reader.read();
-        let _discard = reader.read_bytes(mod_offset);
+
+        reader.set_pos(reader.pos() + mod_offset);
+
         let mods = arr![Mod::from_reader(reader)?; 4];
 
         Ok(Self {
@@ -654,6 +676,7 @@ pub enum Mod {
 
 impl Mod {
     const SIZE: usize = 6;
+
     fn from_reader(reader: &Reader) -> Result<Self> {
         let start_pos = reader.pos();
         let first_byte = reader.read();
@@ -684,6 +707,7 @@ pub struct AHDEnv {
     pub hold: u8,
     pub decay: u8,
 }
+
 impl AHDEnv {
     fn from_reader2(reader: &Reader) -> Result<Self> {
         let r = Self {
@@ -757,6 +781,7 @@ pub struct ADSREnv {
     pub sustain: u8,
     pub release: u8,
 }
+
 impl ADSREnv {
     fn from_reader(reader: &Reader, dest: u8) -> Result<Self> {
         Ok(Self {
@@ -799,6 +824,7 @@ pub struct TrigEnv {
     pub decay: u8,
     pub src: u8,
 }
+
 impl TrigEnv {
     fn from_reader(reader: &Reader, dest: u8) -> Result<Self> {
         Ok(Self {

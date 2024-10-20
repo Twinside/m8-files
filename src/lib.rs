@@ -75,7 +75,7 @@ impl fmt::Debug for Song {
             .field("phrases", self.phrases.get(0).unwrap_or(&Phrase::default()))
             .field(
                 "instruments",
-                self.instruments.get(0).unwrap_or(&Instrument::default()),
+                self.instruments.get(2).unwrap_or(&Instrument::default()),
             )
             .field("tables", &self.tables[0])
             .field("grooves", &self.grooves[0])
@@ -116,7 +116,9 @@ impl Song {
             ));
         }
 
-        if version.at_least(3, 0) {
+        if version.at_least(4,0) {
+            Self::from_reader3(&reader, version)
+        } else if version.at_least(3, 0) {
             Self::from_reader3(&reader, version)
         } else {
             Self::from_reader2(&reader, version)
@@ -129,7 +131,7 @@ impl Song {
         let tempo = LittleEndian::read_f32(reader.read_bytes(4));
         let quantize = reader.read();
         let name = reader.read_string(12);
-        let midi_settings = MidiSettings::from_reader(reader)?;
+        let midi_settings = MidiSettings::try_from(reader)?;
         let key = reader.read();
         reader.read_bytes(18); // Skip
         let mixer_settings = MixerSettings::from_reader(reader)?;
@@ -203,7 +205,7 @@ impl Song {
         let tempo = LittleEndian::read_f32(reader.read_bytes(4));
         let quantize = reader.read();
         let name = reader.read_string(12);
-        let midi_settings = MidiSettings::from_reader(reader)?;
+        let midi_settings = MidiSettings::try_from(reader)?;
         let key = reader.read();
         reader.read_bytes(18); // Skip
         let mixer_settings = MixerSettings::from_reader(reader)?;
@@ -353,6 +355,7 @@ pub struct ChainStep {
     pub phrase: u8,
     pub transpose: u8,
 }
+
 impl Default for ChainStep {
     fn default() -> Self {
         Self {
@@ -361,6 +364,7 @@ impl Default for ChainStep {
         }
     }
 }
+
 impl ChainStep {
     pub fn print(&self, row: u8) -> String {
         if self.phrase == 255 {

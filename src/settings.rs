@@ -16,8 +16,11 @@ pub struct MidiSettings {
     pub track_input_program_change: bool,
     pub track_input_mode: u8,
 }
-impl MidiSettings {
-    pub(crate) fn from_reader(reader: &Reader) -> Result<Self> {
+
+impl TryFrom<&Reader> for MidiSettings {
+    type Error = ParseError;
+
+    fn try_from(reader: &Reader) -> Result<Self> {
         Ok(Self {
             receive_sync: reader.read_bool(),
             receive_transport: reader.read(),
@@ -33,6 +36,7 @@ impl MidiSettings {
             track_input_program_change: reader.read_bool(),
             track_input_mode: reader.read(),
         })
+
     }
 }
 
