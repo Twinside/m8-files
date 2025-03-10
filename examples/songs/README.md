@@ -12,6 +12,13 @@ So we have:
  * `V5EMPTY.m8s` : Empty song in the 4.2 format (FW 5.0) (different form V4EMPTY.m8s)
  * `TEST-FILE.m8s` : Historic test song
 
+## Bundle
+
+We have a song and it's bundled counterpart:
+
+ * `FDUB3.m8s` : original song
+ * `FDUB3_BUNDLED.m8s` : Song file after bundling.
+
 ## CommandMappingV4
 
 So we have a literal test song named `CMDMAPPING.m8s`
@@ -25,7 +32,7 @@ the file format.
 As much as possible the filename include the instrument/eq number/phrase
 for ease of mapping.
 
- * CMDMAPPING_4_0.m8s : first version of the file, saved with a firmware v4
- * CMDMAPPING_5_0.m8s : same file as before, but saved with a firmware 5.0.
+ * `CMDMAPPING_4_0.m8s` : first version of the file, saved with a firmware v4
+ * `CMDMAPPING_5_0.m8s` : same file as before, but saved with a firmware 5.0.
         There is differences :).
 
