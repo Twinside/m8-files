@@ -22,6 +22,12 @@ pub enum SamplePlayMode {
     OSC,
     OSC_REV,
     OSC_PP,
+    REPITCH,
+    REP_REV,
+    REP_PP,
+    REP_BPM,
+    BPM_REV,
+    BPM_PP,
 }
 
 #[derive(PartialEq, Debug, Clone)]
