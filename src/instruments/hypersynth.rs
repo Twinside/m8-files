@@ -28,7 +28,7 @@ pub struct HyperSynth {
 }
 
 #[rustfmt::skip] // Keep constants with important order vertical for maintenance
-const HYPERSYNTH_COMMAND_NAMES : [&'static str; CommandPack::BASE_INSTRUMENT_COMMAND_COUNT + 2] = [
+const HYPERSYNTH_COMMAND_NAMES : [&'static str; CommandPack::BASE_INSTRUMENT_COMMAND_COUNT + 3] = [
     "VOL",
     "PIT",
     "FIN",
@@ -51,7 +51,8 @@ const HYPERSYNTH_COMMAND_NAMES : [&'static str; CommandPack::BASE_INSTRUMENT_COM
 
     // EXTRA
     "CVO",
-    "SNC"
+    "SNC",
+    "ERR"
 ];
 
 #[rustfmt::skip] // Keep constants with important order vertical for maintenance
