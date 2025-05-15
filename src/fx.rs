@@ -1,4 +1,5 @@
 use crate::reader::*;
+use crate::remapper::{InstrumentMapping, TableMapping};
 use crate::version::*;
 use crate::writer::Writer;
 use crate::CommandPack;
@@ -10,6 +11,18 @@ pub struct FxCommands {
 }
 
 impl FxCommands {
+    pub fn find_indices(&self, to_find: &[&str]) -> Vec<u8> {
+        let mut out = vec![];
+
+        for (i, cmd) in self.commands.iter().enumerate() {
+            if to_find.contains(cmd) {
+                out.push(i as u8)
+            }
+        }
+
+        out
+    }
+
     pub fn try_render(self, cmd: u8) -> Option<&'static str> {
         let cmd = cmd as usize;
 
@@ -25,6 +38,27 @@ impl FxCommands {
 pub struct FX {
     pub command: u8,
     pub value: u8,
+}
+
+impl FX {
+    pub fn map_instr(self, instr_mapping : &InstrumentMapping, table_mapping: &TableMapping) -> Self {
+        let uval = self.value as usize;
+        if instr_mapping.instrument_tracking_commands.contains(&self.command) &&
+            uval < instr_mapping.mapping.len() {
+            Self {
+                command: self.command,
+                value: instr_mapping.mapping[uval]
+            }
+        } else if table_mapping.table_tracking_commands.contains(&self.command)  &&
+                uval < table_mapping.mapping.len() {
+            Self {
+                command: self.command,
+                value: table_mapping.mapping[uval]
+            }
+        } else {
+            self
+        }
+    }
 }
 
 impl Default for FX {

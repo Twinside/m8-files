@@ -1,9 +1,10 @@
+use std::collections::HashSet;
+
 use arr_macro::arr;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-    songs::{Song, V4_1_OFFSETS, V4_OFFSETS},
-    Instrument, Version,
+    songs::{Song, V4_1_OFFSETS, V4_OFFSETS}, Instrument, Version
 };
 
 #[repr(u8)]
@@ -77,6 +78,10 @@ impl EqMapping {
 
 /// For every instrument, it's destination instrument
 pub struct InstrumentMapping {
+    /// List all the command ID referencing an instrument as
+    /// value. Depend on the song version number.
+    pub instrument_tracking_commands : Vec<u8>,
+
     /// Mapping from the "from" song instrument index to the "to"
     /// song instrument index
     pub mapping: [u8; Song::N_INSTRUMENTS],
@@ -104,11 +109,10 @@ impl InstrumentMapping {
 
         acc
     }
-}
 
-impl Default for InstrumentMapping {
-    fn default() -> Self {
+    pub fn new(instrument_tracking_commands: Vec<u8>) -> Self {
         Self {
+            instrument_tracking_commands,
             mapping: make_mapping(0),
             to_move: vec![],
         }
@@ -116,6 +120,10 @@ impl Default for InstrumentMapping {
 }
 
 pub struct TableMapping {
+    /// List all the command ID referencing a table as
+    /// value. Depend on the song version number.
+    pub table_tracking_commands : Vec<u8>,
+
     /// Mapping from the "from" song index to the to
     pub mapping: [u8; Song::N_TABLES],
 
@@ -135,11 +143,10 @@ impl TableMapping {
         self.mapping[from as usize] = to;
         self.to_move.push(from);
     }
-}
 
-impl Default for TableMapping {
-    fn default() -> Self {
+    fn new(table_tracking_commands: Vec<u8>) -> Self {
         Self {
+            table_tracking_commands,
             mapping: make_mapping(Song::N_TABLES as u8),
             to_move: vec![],
         }
@@ -315,12 +322,220 @@ fn try_allocate(allocation_state: &[bool], previous_id: u8) -> Option<usize> {
     }
 }
 
+const INSTRUMENT_TRACKING_COMMAND_NAMES : [&'static str; 2] = ["INS", "NXT"];
+
+const TABLE_TRACKING_COMMAND_NAMES : [&'static str; 1] = ["TBX"];
+
+/// brief struture to hold structures used to allocate instruments
+struct InstrumentAllocatorState<'a> {
+    from_song: &'a Song,
+    to_song: &'a Song,
+
+    /// cycle detection, can happen if we follow
+    /// INS/NXT references
+    seen_instruments: HashSet<u8>,
+
+    /// cycle detection, can happen if we follow
+    /// INS/NXT/TBX references
+    seen_tables: HashSet<u8>,
+
+    /// flags on instruments in "from"
+    instrument_flags: [bool; Song::N_INSTRUMENTS],
+    /// flags on tables in "from"
+    table_flags: [bool; Song::N_TABLES],
+    /// flags on eqsin "from"
+    eq_flags: Vec<bool>,
+    // flags on eqsin "to"
+    allocated_eqs: Vec<bool>,
+    allocated_instruments: [bool; Song::N_INSTRUMENTS],
+    instrument_mapping: InstrumentMapping,
+    eq_mapping: EqMapping,
+    table_mapping: TableMapping,
+}
+
+
+impl<'a> InstrumentAllocatorState<'a> {
+    fn new(from_song: &'a Song, to_song: &'a Song) -> InstrumentAllocatorState<'a> {
+        let fx_commands_names = crate::FX::fx_command_names(from_song.version);
+        let instrument_tracking_commands =
+            fx_commands_names.find_indices(&INSTRUMENT_TRACKING_COMMAND_NAMES);
+        let table_tracking_commands =
+            fx_commands_names.find_indices(&TABLE_TRACKING_COMMAND_NAMES);
+
+        InstrumentAllocatorState {
+            from_song,
+            to_song,
+
+            table_mapping: TableMapping::new(table_tracking_commands),
+            seen_instruments: HashSet::new(),
+            seen_tables: HashSet::new(),
+
+            allocated_eqs: find_referenced_eq(to_song),
+            allocated_instruments: find_allocated_instruments(to_song),
+            eq_flags: vec![false; from_song.eqs.len()],
+            instrument_flags: arr![false; 128],
+            table_flags: arr![false; 256],
+            instrument_mapping: InstrumentMapping::new(instrument_tracking_commands),
+            eq_mapping: EqMapping::default_ver(to_song.version)
+        }
+    }
+
+    fn allocate_eq(&mut self, instr_ix: usize, equ: usize) -> Result<(), String> {
+        self.eq_flags[equ as usize] = true;
+        let from_eq = &self.from_song.eqs[equ];
+        // try to find an already exisint Eq with same parameters
+        match self.to_song.eqs.iter().position(|to_eq| to_eq == from_eq) {
+            Some(eq_idx) if (eq_idx as usize) < self.eq_mapping.mapping.len() => {
+                self.eq_mapping.mapping[equ] = eq_idx as u8
+            }
+            Some(_) | None => match try_allocate(&self.allocated_eqs, equ as u8) {
+                None => {
+                    return Err(format!(
+                        "No more available eqs for instrument {instr_ix}"
+                    ))
+                }
+                Some(eq_slot) => {
+                    self.allocated_eqs[eq_slot] = true;
+                    self.eq_mapping.mapping[equ] = eq_slot as u8;
+                    self.eq_mapping.to_move.push(equ as u8);
+                }
+            },
+        }
+
+        Ok(())
+    }
+
+    fn is_touching_instrument(&self, cmd: u8) -> bool {
+        self.instrument_mapping.instrument_tracking_commands.contains(&cmd)
+    }
+
+    fn is_touching_table(&self, cmd: u8) -> bool {
+        self.table_mapping.table_tracking_commands.contains(&cmd)
+    }
+
+    fn touch_table(&mut self, table_ix: usize) -> Result<(), String> {
+
+        // out of bound instrument, dont bother or if already allocated
+        if table_ix >= Song::N_TABLES || self.table_flags[table_ix] {
+            return Ok(());
+        }
+
+        if self.seen_tables.contains(&(table_ix as u8)) {
+            return Err(format!("Detected cycles in tables"))
+        }
+
+        self.seen_tables.insert(table_ix as u8);
+
+        // if the table contains NXT command, we need to track NXT'ed command
+        let instrument_table = &self.from_song.tables[table_ix];
+        for table_step in instrument_table.steps.iter() {
+            if self.is_touching_instrument(table_step.fx1.command) {
+                self.touch_instrument(table_step.fx1.value as usize)?;
+            }
+
+            if self.is_touching_table(table_step.fx1.command) {
+                self.touch_table(table_step.fx1.command as usize)?;
+            }
+
+            if self.is_touching_instrument(table_step.fx2.command) {
+                self.touch_instrument(table_step.fx2.value as usize)?;
+            }
+
+            if self.is_touching_table(table_step.fx2.command) {
+                self.touch_table(table_step.fx2.command as usize)?;
+            }
+
+            if self.is_touching_instrument(table_step.fx3.command) {
+                self.touch_instrument(table_step.fx3.value as usize)?;
+            }
+
+            if self.is_touching_table(table_step.fx3.command) {
+                self.touch_table(table_step.fx3.command as usize)?;
+            }
+        }
+
+        // ok so we are not tied to an instruments, we must
+        // allocate a slot for ourselves.
+        if table_ix > Song::N_INSTRUMENTS {
+            todo!("Need to find a fresh slot and mark the mapping")
+        }
+
+        self.seen_tables.remove(&(table_ix as u8));
+
+        Ok(())
+    }
+
+    fn touch_instrument(
+        &mut self,
+        instr_ix: usize) -> Result<(), String> {
+        let from_song = self.from_song;
+        let to_song = self.to_song;
+
+        // out of bound instrument, dont bother or if already allocated
+        if instr_ix >= Song::N_INSTRUMENTS || self.instrument_flags[instr_ix] {
+            return Ok(());
+        }
+
+        if self.seen_instruments.contains(&(instr_ix as u8)) {
+            return Err(format!("Detected cycles in instruments"))
+        }
+
+        self.seen_instruments.insert(instr_ix as u8);
+
+        let mut instr = from_song.instruments[instr_ix].clone();
+
+        // first we search the new EQ
+        if let Some(equ) = instr.equ() {
+            let equ = equ as usize;
+
+            if equ < self.eq_flags.len() && !self.eq_flags[equ] {
+                self.allocate_eq(instr_ix, equ)?;
+                // finally update our Eq in our local copy
+                instr.set_eq(self.eq_mapping.mapping[equ]);
+            }
+        }
+        
+        self.touch_table(instr_ix)?;
+
+        self.instrument_flags[instr_ix] = true;
+        match to_song.instruments.iter().position(|i| i == &instr) {
+            // horray we have a matching instrument, reuse it
+            Some(to_instr_ix) => {
+                self.instrument_mapping.mapping[instr_ix] = to_instr_ix as u8
+            }
+            // no luck, allocate a fresh one
+            None => match try_allocate(&self.allocated_instruments, instr_ix as u8) {
+                None => {
+                    return Err(format!(
+                        "No more available instrument slots for instrument {instr_ix}"
+                    ))
+                }
+                Some(to_instr_ix) => {
+                    self.instrument_mapping.mapping[instr_ix] = to_instr_ix as u8;
+                    self.allocated_instruments[to_instr_ix] = true;
+                    self.instrument_mapping.to_move.push(instr_ix as u8)
+                }
+            },
+        };
+
+        self.seen_instruments.remove(&(instr_ix as u8));
+        Ok(())
+    }
+
+}
+
 impl Remapper {
     pub fn default_ver(ver: Version) -> Self {
+        let command_names = crate::FX::fx_command_names(ver);
+        let instrument_tracking_commands =
+            command_names.find_indices(&INSTRUMENT_TRACKING_COMMAND_NAMES);
+        let table_tracking_commands =
+            command_names.find_indices(&TABLE_TRACKING_COMMAND_NAMES);
+
         Self {
             eq_mapping: EqMapping::default_ver(ver),
-            instrument_mapping: Default::default(),
-            table_mapping: Default::default(),
+            instrument_mapping: InstrumentMapping::new(instrument_tracking_commands),
+            table_mapping: TableMapping::new(table_tracking_commands ),
             phrase_mapping: Default::default(),
             chain_mapping: Default::default(),
         }
@@ -397,6 +612,7 @@ impl Remapper {
         from_song: &Song,
         to_song: &Song,
         instrument_mapping: &InstrumentMapping,
+        table_mapping: &TableMapping,
         from_chains_ids: IT,
     ) -> Result<PhraseMapping, String>
     where
@@ -420,7 +636,7 @@ impl Remapper {
                 }
 
                 seen_phrase[phrase_ix] = true;
-                let phrase = from_song.phrases[phrase_ix].map_instruments(&instrument_mapping);
+                let phrase = from_song.phrases[phrase_ix].map_instruments(instrument_mapping, table_mapping);
                 match to_song.phrases.iter().position(|p| p.steps == phrase.steps) {
                     Some(known) => phrase_mapping[phrase_ix] = known as u8,
                     None => match try_allocate(&allocated_phrases, phrase_ix as u8) {
@@ -447,23 +663,15 @@ impl Remapper {
 
     /// Find location in destination song for EQ and instruments
     fn allocate_eq_and_instruments<'a, IT>(
-        from_song: &Song,
-        to_song: &Song,
+        from_song: &'a Song,
+        to_song: &'a Song,
         from_chains_ids: IT,
-    ) -> Result<(EqMapping, InstrumentMapping), String>
+    ) -> Result<InstrumentAllocatorState<'a>, String>
     where
         IT: Iterator<Item = &'a u8>,
     {
-        // flags on instruments in "from"
-        let mut instrument_flags: [bool; Song::N_INSTRUMENTS] = arr![false; 128];
-        // flags on eqsin "from"
-        let mut eq_flags = vec![false; from_song.eqs.len()];
-        // flags on eqs in "to"
-        let mut allocated_eqs = find_referenced_eq(to_song);
-        let mut allocated_instruments = find_allocated_instruments(to_song);
-        let mut instrument_mapping = InstrumentMapping::default();
-        // eqs from "from" to "to"
-        let mut eq_mapping = EqMapping::default_ver(to_song.version);
+        let mut alloc_state =
+            InstrumentAllocatorState::new(from_song, to_song);
 
         for chain_id in from_chains_ids {
             let from_chain = &from_song.chains[*chain_id as usize];
@@ -477,71 +685,36 @@ impl Remapper {
                 let phrase = &from_song.phrases[phrase_id];
 
                 for step in &phrase.steps {
-                    let instr_ix = step.instrument as usize;
+                    alloc_state.touch_instrument(step.instrument as usize)?;
 
-                    // out of bound instrument, dont bother or if already allocated
-                    if instr_ix >= Song::N_INSTRUMENTS || instrument_flags[instr_ix] {
-                        continue;
+                    if alloc_state.is_touching_instrument(step.fx1.command) {
+                        alloc_state.touch_instrument(step.fx1.value as usize)?;
                     }
 
-                    let mut instr = from_song.instruments[instr_ix].clone();
-
-                    // first we search the new EQ
-                    if let Some(equ) = instr.equ() {
-                        let equ = equ as usize;
-
-                        if equ < eq_flags.len() && !eq_flags[equ] {
-                            eq_flags[equ as usize] = true;
-                            let from_eq = &from_song.eqs[equ];
-                            // try to find an already exisint Eq with same parameters
-                            match to_song.eqs.iter().position(|to_eq| to_eq == from_eq) {
-                                Some(eq_idx) if (eq_idx as usize) < eq_mapping.mapping.len() => {
-                                    eq_mapping.mapping[equ] = eq_idx as u8
-                                }
-                                Some(_) | None => match try_allocate(&allocated_eqs, equ as u8) {
-                                    None => {
-                                        return Err(format!(
-                                            "No more available eqs for instrument {instr_ix}"
-                                        ))
-                                    }
-                                    Some(eq_slot) => {
-                                        allocated_eqs[eq_slot] = true;
-                                        eq_mapping.mapping[equ] = eq_slot as u8;
-                                        eq_mapping.to_move.push(equ as u8);
-                                    }
-                                },
-                            }
-
-                            // finally update our Eq in our local copy
-                            instr.set_eq(eq_mapping.mapping[equ]);
-                        }
+                    if alloc_state.is_touching_table(step.fx1.command) {
+                        alloc_state.touch_table(step.fx1.command as usize)?;
                     }
 
-                    instrument_flags[instr_ix] = true;
-                    match to_song.instruments.iter().position(|i| i == &instr) {
-                        // horray we have a matching instrument, reuse it
-                        Some(to_instr_ix) => {
-                            instrument_mapping.mapping[instr_ix] = to_instr_ix as u8
-                        }
-                        // no luck, allocate a fresh one
-                        None => match try_allocate(&allocated_instruments, instr_ix as u8) {
-                            None => {
-                                return Err(format!(
-                                    "No more available instrument slots for instrument {instr_ix}"
-                                ))
-                            }
-                            Some(to_instr_ix) => {
-                                instrument_mapping.mapping[instr_ix] = to_instr_ix as u8;
-                                allocated_instruments[to_instr_ix] = true;
-                                instrument_mapping.to_move.push(instr_ix as u8)
-                            }
-                        },
+                    if alloc_state.is_touching_instrument(step.fx2.command) {
+                        alloc_state.touch_instrument(step.fx2.value as usize)?;
+                    }
+
+                    if alloc_state.is_touching_table(step.fx2.command) {
+                        alloc_state.touch_table(step.fx2.command as usize)?;
+                    }
+
+                    if alloc_state.is_touching_instrument(step.fx3.command) {
+                        alloc_state.touch_instrument(step.fx3.value as usize)?;
+                    }
+
+                    if alloc_state.is_touching_table(step.fx3.command) {
+                        alloc_state.touch_table(step.fx3.command as usize)?;
                     }
                 }
             }
         }
 
-        Ok((eq_mapping, instrument_mapping))
+        Ok(alloc_state)
     }
 
     pub fn create<'a, IT>(from_song: &Song, to_song: &Song, chains: IT) -> Result<Remapper, String>
@@ -551,20 +724,27 @@ impl Remapper {
         let chain_vec: Vec<u8> = chains.map(|v| *v).collect();
 
         // eqs from "from" to "to"
-        let (eq_mapping, instrument_mapping) =
-            Remapper::allocate_eq_and_instruments(from_song, to_song, chain_vec.iter())?;
+        let alloc_state =
+            Remapper::allocate_eq_and_instruments(
+                from_song,
+                to_song,
+                chain_vec.iter())?;
+
         let phrase_mapping =
-            Remapper::allocate_phrases(from_song, to_song, &instrument_mapping, chain_vec.iter())?;
+            Remapper::allocate_phrases(
+                from_song,
+                to_song,
+                &alloc_state.instrument_mapping,
+                &alloc_state.table_mapping,
+                chain_vec.iter())?;
 
         let chain_mapping =
             Remapper::allocate_chains(from_song, to_song, &phrase_mapping, chain_vec.iter())?;
 
-        let table_mapping = Default::default();
-
         Ok(Self {
-            eq_mapping,
-            instrument_mapping,
-            table_mapping,
+            eq_mapping: alloc_state.eq_mapping,
+            instrument_mapping: alloc_state.instrument_mapping,
+            table_mapping: alloc_state.table_mapping,
             phrase_mapping,
             chain_mapping,
         })
@@ -625,7 +805,7 @@ impl Remapper {
         // remap instr in phrases
         for phrase_id in 0..Song::N_PHRASES {
             song.phrases[phrase_id] =
-                song.phrases[phrase_id].map_instruments(&self.instrument_mapping);
+                song.phrases[phrase_id].map_instruments(&self.instrument_mapping, &self.table_mapping);
         }
 
         // move chain
@@ -662,7 +842,8 @@ impl Remapper {
                 }
             }
 
-            to.tables[to_index] = from.tables[instr_id].clone();
+            to.tables[to_index] = from.tables[instr_id]
+                .map_instr(&self.instrument_mapping, &self.table_mapping);
             to.instruments[to_index] = instr;
         }
 
@@ -670,14 +851,15 @@ impl Remapper {
         for table_id in self.table_mapping.to_move.iter() {
             let table_id = *table_id as usize;
             let to_index = self.table_mapping.mapping[table_id] as usize;
-            to.tables[to_index] = from.tables[table_id].clone();
+            to.tables[to_index] = from.tables[table_id]
+                .map_instr(&self.instrument_mapping, &self.table_mapping);
         }
 
         for phrase_id in self.phrase_mapping.to_move.iter() {
             let phrase_id = *phrase_id as usize;
             let to_index = self.phrase_mapping.mapping[phrase_id];
             to.phrases[to_index as usize] =
-                from.phrases[phrase_id].map_instruments(&self.instrument_mapping);
+                from.phrases[phrase_id].map_instruments(&self.instrument_mapping, &self.table_mapping);
         }
 
         for chain_id in self.chain_mapping.to_move.iter() {

@@ -6,6 +6,7 @@ use crate::instruments::*;
 use crate::reader::*;
 use crate::remapper::InstrumentMapping;
 use crate::remapper::PhraseMapping;
+use crate::remapper::TableMapping;
 use crate::scale::*;
 use crate::settings::*;
 use crate::version::*;
@@ -545,10 +546,10 @@ impl Phrase {
         acc
     }
 
-    pub fn map_instruments(&self, instr_map: &InstrumentMapping) -> Self {
+    pub fn map_instruments(&self, instr_map: &InstrumentMapping, table_map: &TableMapping) -> Self {
         let mut steps = self.steps.clone();
         for i in 0..steps.len() {
-            steps[i] = steps[i].map_instr(&instr_map);
+            steps[i] = steps[i].map_instr(&instr_map, table_map);
         }
 
         Self {
@@ -647,20 +648,23 @@ impl Step {
             && self.fx3.is_empty()
     }
 
-    pub fn map_instr(&self, mapping: &InstrumentMapping) -> Step {
+    pub fn map_instr(
+        &self,
+        instrument_mapping: &InstrumentMapping,
+        table_mapping: &TableMapping) -> Step {
         let instrument = if (self.instrument as usize) >= Song::N_INSTRUMENTS {
             self.instrument
         } else {
-            mapping.mapping[self.instrument as usize]
+            instrument_mapping.mapping[self.instrument as usize]
         };
 
         Self {
             note: self.note,
             velocity: self.velocity,
             instrument,
-            fx1: self.fx1,
-            fx2: self.fx2,
-            fx3: self.fx3,
+            fx1: self.fx1.map_instr(instrument_mapping, table_mapping),
+            fx2: self.fx2.map_instr(instrument_mapping, table_mapping),
+            fx3: self.fx3.map_instr(instrument_mapping, table_mapping),
         }
     }
 
@@ -754,6 +758,20 @@ impl Table {
         }
     }
 
+    pub fn map_instr(&self, instr_mapping: &InstrumentMapping, table_mapping: &TableMapping) -> Self {
+        let mut steps = self.steps.clone();
+
+        for i in 0 .. 16 {
+            steps[i] = steps[i].map_instr(instr_mapping, table_mapping);
+        }
+
+        Self {
+            version: self.version,
+            steps
+        }
+
+    }
+
     pub fn print_screen(&self, cmd: CommandPack) -> String {
         let fx_cmd = FX::fx_command_names(self.version);
         let mut acc = String::from("  N  V  FX1   FX2   FX3  \n");
@@ -822,6 +840,16 @@ impl Default for TableStep {
 
 impl TableStep {
     pub const V4_SIZE: usize = 2 + 3 * FX::V4_SIZE;
+
+    pub fn map_instr(&self, instr_mapping: &InstrumentMapping, table_mapping: &TableMapping) -> TableStep {
+        Self {
+            transpose: self.transpose,
+            velocity: self.velocity,
+            fx1: self.fx1.map_instr(instr_mapping, table_mapping),
+            fx2: self.fx2.map_instr(instr_mapping, table_mapping),
+            fx3: self.fx3.map_instr(instr_mapping, table_mapping)
+        }
+    }
 
     pub fn is_empty(&self) -> bool {
         self.transpose == 0
