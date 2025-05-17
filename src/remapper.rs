@@ -4,7 +4,7 @@ use arr_macro::arr;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-    songs::{Song, V4_1_OFFSETS, V4_OFFSETS}, Instrument, Version
+    songs::{Song, V4_1_OFFSETS, V4_OFFSETS}, Instrument, Version, FX
 };
 
 #[repr(u8)]
@@ -33,6 +33,10 @@ fn make_mapping<const C: usize>(offset: u8) -> [u8; C] {
 }
 
 pub struct EqMapping {
+    /// List all the command ID referencing an EQ as
+    /// value. Depend on the song version number.
+    pub eq_tracking_commands : Vec<u8>,
+
     /// Mapping from the "from" song eq index to the "to" song
     /// eq index
     pub mapping: Vec<u8>,
@@ -44,13 +48,18 @@ pub struct EqMapping {
 
 impl EqMapping {
     pub fn default_ver(ver: Version) -> EqMapping {
+        let command_names = FX::fx_command_names(ver);
+        let eq_tracking_commands = command_names.find_indices(&EQ_TRACKING_COMMAND_NAMES);
+
         if ver.at_least(4, 1) {
             EqMapping {
+                eq_tracking_commands,
                 mapping: vec![0; V4_1_OFFSETS.instrument_eq_count],
                 to_move: vec![],
             }
         } else {
             EqMapping {
+                eq_tracking_commands,
                 mapping: vec![0; V4_OFFSETS.instrument_eq_count],
                 to_move: vec![],
             }
@@ -326,6 +335,8 @@ const INSTRUMENT_TRACKING_COMMAND_NAMES : [&'static str; 2] = ["INS", "NXT"];
 
 const TABLE_TRACKING_COMMAND_NAMES : [&'static str; 1] = ["TBX"];
 
+const EQ_TRACKING_COMMAND_NAMES : [&'static str; 1] = ["EQI"];
+
 /// brief struture to hold structures used to allocate instruments
 struct InstrumentAllocatorState<'a> {
     from_song: &'a Song,
@@ -380,7 +391,7 @@ impl<'a> InstrumentAllocatorState<'a> {
         }
     }
 
-    fn allocate_eq(&mut self, instr_ix: usize, equ: usize) -> Result<(), String> {
+    fn allocate_eq(&mut self, equ: usize) -> Result<(), String> {
         self.eq_flags[equ as usize] = true;
         let from_eq = &self.from_song.eqs[equ];
         // try to find an already exisint Eq with same parameters
@@ -390,9 +401,7 @@ impl<'a> InstrumentAllocatorState<'a> {
             }
             Some(_) | None => match try_allocate(&self.allocated_eqs, equ as u8) {
                 None => {
-                    return Err(format!(
-                        "No more available eqs for instrument {instr_ix}"
-                    ))
+                    return Err(format!("No more available eqs"))
                 }
                 Some(eq_slot) => {
                     self.allocated_eqs[eq_slot] = true;
@@ -413,6 +422,10 @@ impl<'a> InstrumentAllocatorState<'a> {
         self.table_mapping.table_tracking_commands.contains(&cmd)
     }
 
+    fn is_touching_eq(&self, cmd: u8) -> bool {
+        self.eq_mapping.eq_tracking_commands.contains(&cmd)
+    }
+
     fn touch_table(&mut self, table_ix: usize) -> Result<(), String> {
 
         // out of bound instrument, dont bother or if already allocated
@@ -429,28 +442,18 @@ impl<'a> InstrumentAllocatorState<'a> {
         // if the table contains NXT command, we need to track NXT'ed command
         let instrument_table = &self.from_song.tables[table_ix];
         for table_step in instrument_table.steps.iter() {
-            if self.is_touching_instrument(table_step.fx1.command) {
-                self.touch_instrument(table_step.fx1.value as usize)?;
-            }
+            for fx in table_step.all_fx() {
+                if self.is_touching_instrument(fx.command) {
+                    self.touch_instrument(fx.value as usize)?;
+                }
 
-            if self.is_touching_table(table_step.fx1.command) {
-                self.touch_table(table_step.fx1.command as usize)?;
-            }
+                if self.is_touching_table(fx.command) {
+                    self.touch_table(fx.command as usize)?;
+                }
 
-            if self.is_touching_instrument(table_step.fx2.command) {
-                self.touch_instrument(table_step.fx2.value as usize)?;
-            }
-
-            if self.is_touching_table(table_step.fx2.command) {
-                self.touch_table(table_step.fx2.command as usize)?;
-            }
-
-            if self.is_touching_instrument(table_step.fx3.command) {
-                self.touch_instrument(table_step.fx3.value as usize)?;
-            }
-
-            if self.is_touching_table(table_step.fx3.command) {
-                self.touch_table(table_step.fx3.command as usize)?;
+                if self.is_touching_eq(fx.command) {
+                    self.touch_eq(fx.command as usize)?;
+                }
             }
         }
 
@@ -462,6 +465,13 @@ impl<'a> InstrumentAllocatorState<'a> {
 
         self.seen_tables.remove(&(table_ix as u8));
 
+        Ok(())
+    }
+
+    fn touch_eq(&mut self, eq_ix: usize) -> Result<(), String> {
+        if eq_ix < self.eq_flags.len() && !self.eq_flags[eq_ix] {
+            self.allocate_eq(eq_ix)?;
+        }
         Ok(())
     }
 
@@ -489,10 +499,10 @@ impl<'a> InstrumentAllocatorState<'a> {
             let equ = equ as usize;
 
             if equ < self.eq_flags.len() && !self.eq_flags[equ] {
-                self.allocate_eq(instr_ix, equ)?;
-                // finally update our Eq in our local copy
-                instr.set_eq(self.eq_mapping.mapping[equ]);
+                self.allocate_eq(equ)?;
             }
+            // finally update our Eq in our local copy
+            instr.set_eq(self.eq_mapping.mapping[equ]);
         }
         
         self.touch_table(instr_ix)?;
@@ -687,28 +697,18 @@ impl Remapper {
                 for step in &phrase.steps {
                     alloc_state.touch_instrument(step.instrument as usize)?;
 
-                    if alloc_state.is_touching_instrument(step.fx1.command) {
-                        alloc_state.touch_instrument(step.fx1.value as usize)?;
-                    }
+                    for fx in step.all_fx() {
+                        if alloc_state.is_touching_instrument(fx.command) {
+                            alloc_state.touch_instrument(fx.value as usize)?;
+                        }
 
-                    if alloc_state.is_touching_table(step.fx1.command) {
-                        alloc_state.touch_table(step.fx1.command as usize)?;
-                    }
+                        if alloc_state.is_touching_table(fx.command) {
+                            alloc_state.touch_table(fx.command as usize)?;
+                        }
 
-                    if alloc_state.is_touching_instrument(step.fx2.command) {
-                        alloc_state.touch_instrument(step.fx2.value as usize)?;
-                    }
-
-                    if alloc_state.is_touching_table(step.fx2.command) {
-                        alloc_state.touch_table(step.fx2.command as usize)?;
-                    }
-
-                    if alloc_state.is_touching_instrument(step.fx3.command) {
-                        alloc_state.touch_instrument(step.fx3.value as usize)?;
-                    }
-
-                    if alloc_state.is_touching_table(step.fx3.command) {
-                        alloc_state.touch_table(step.fx3.command as usize)?;
+                        if alloc_state.is_touching_eq(fx.command) {
+                            alloc_state.touch_eq(fx.command as usize)?;
+                        }
                     }
                 }
             }

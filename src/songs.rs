@@ -606,6 +606,10 @@ pub struct Step {
 impl Step {
     pub const V4_SIZE: usize = 3 + 3 * FX::V4_SIZE;
 
+    pub fn all_fx(&self) -> [FX; 3] {
+        [self.fx1, self.fx2, self.fx3]
+    }
+
     pub fn print(&self, row: u8, fx_cmds: FxCommands, cmd_pack: CommandPack) -> String {
         let velocity = if self.velocity == 255 {
             format!("--")
@@ -840,6 +844,10 @@ impl Default for TableStep {
 
 impl TableStep {
     pub const V4_SIZE: usize = 2 + 3 * FX::V4_SIZE;
+
+    pub fn all_fx(&self) -> [FX; 3] {
+        [self.fx1, self.fx2, self.fx3]
+    }
 
     pub fn map_instr(&self, instr_mapping: &InstrumentMapping, table_mapping: &TableMapping) -> TableStep {
         Self {
